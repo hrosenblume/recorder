@@ -24,7 +24,7 @@ VERSION="$1"
 
 cd "$(dirname "$0")/.."
 PLIST="Resources/Info.plist"
-APP_PATH="$HOME/Applications/Recorder.app"
+APP_PATH="/Applications/Recorder.app"
 BUILD_DIR="build"
 ZIP_PATH="${BUILD_DIR}/Recorder.app.zip"
 

@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 APP_NAME="Recorder"
 BUNDLE_ID="com.hunter.recorder"
 BIN_NAME="recorder"
-APP_PATH="$HOME/Applications/${APP_NAME}.app"
+APP_PATH="/Applications/${APP_NAME}.app"
 
 echo "==> Generating icon"
 if [ ! -f "Resources/Recorder.icns" ] || [ "scripts/generate-icon.swift" -nt "Resources/Recorder.icns" ]; then

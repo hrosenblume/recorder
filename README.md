@@ -42,7 +42,7 @@ Requires Swift 5.9+ (Command Line Tools is enough — full Xcode not needed).
 git clone https://github.com/hrosenblume/recorder
 cd recorder
 bash scripts/build-app.sh
-open ~/Applications/Recorder.app
+open /Applications/Recorder.app
 ```
 
 The build script generates the icon, compiles via SwiftPM, assembles the `.app` bundle, and ad-hoc codesigns with a stable identifier so TCC remembers your permission grants across rebuilds.

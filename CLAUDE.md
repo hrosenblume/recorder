@@ -5,8 +5,8 @@ Personal macOS menu-bar screen recorder. Mirror of the Redeye repo treatment (au
 ## Build
 
 ```bash
-bash scripts/build-app.sh        # builds → ~/Applications/Recorder.app
-open ~/Applications/Recorder.app
+bash scripts/build-app.sh        # builds → /Applications/Recorder.app
+open /Applications/Recorder.app
 ```
 
 The bundle is rebuilt **in place** so TCC keeps remembering Screen Recording / Microphone grants. Don't `rm -rf` the `.app` between builds.
