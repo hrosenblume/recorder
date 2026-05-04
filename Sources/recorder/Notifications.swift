@@ -8,7 +8,7 @@ enum Notifications {
 
     static func recordingSaved(at url: URL) {
         let content = UNMutableNotificationContent()
-        content.title = "Recording saved"
+        content.title = "Saved"
         content.body = url.lastPathComponent
         content.sound = .default
 

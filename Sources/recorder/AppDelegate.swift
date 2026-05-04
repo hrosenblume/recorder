@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
 
         toggleItem = NSMenuItem(
-            title: "Start Recording",
+            title: "Start",
             action: #selector(toggleRecording),
             keyEquivalent: "2"
         )
@@ -28,12 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        recentItem = NSMenuItem(title: "Recent Recordings", action: nil, keyEquivalent: "")
+        recentItem = NSMenuItem(title: "Recents", action: nil, keyEquivalent: "")
         recentItem.submenu = NSMenu()
         menu.addItem(recentItem)
 
         let openItem = NSMenuItem(
-            title: "Open Recordings Folder",
+            title: "Open Destination Folder",
             action: #selector(openRecordingsFolder),
             keyEquivalent: ""
         )
@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(openItem)
 
         let changeFolderItem = NSMenuItem(
-            title: "Change Recordings Folder…",
+            title: "Change Destination Folder…",
             action: #selector(changeRecordingsFolder),
             keyEquivalent: ""
         )
@@ -51,13 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         systemAudioItem = NSMenuItem(
-            title: "Record System Audio",
+            title: "Enable System IO",
             action: #selector(toggleSystemAudio),
             keyEquivalent: ""
         )
         systemAudioItem.target = self
         systemAudioItem.state = Config.recordSystemAudio ? .on : .off
-        systemAudioItem.toolTip = "Captures audio coming out of your speakers/headphones (calls, music, notifications) in a second track."
+        systemAudioItem.toolTip = "Mixes system audio (calls, music) with the mic into a single track."
         menu.addItem(systemAudioItem)
 
         menu.addItem(.separator())
@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: "Quit Recorder",
+            title: "Quit",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -105,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.updateIcon(recording: recording)
-                self.toggleItem.title = recording ? "Stop Recording" : "Start Recording"
+                self.toggleItem.title = recording ? "Stop" : "Start"
             }
         }
         engine.onSaved = { url in

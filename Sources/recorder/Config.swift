@@ -39,4 +39,12 @@ enum Config {
     static func setRecordSystemAudio(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: recordSystemAudioKey)
     }
+
+    // MARK: - Audio mix levels
+    //
+    // Hardcoded for v1.2.0; could become user-configurable later. Mic is
+    // dominant so the user's voice cuts through; system audio is slightly
+    // quieter so it doesn't drown the mic.
+    static let micVolume: Float = 1.0
+    static let systemAudioVolume: Float = 0.85
 }

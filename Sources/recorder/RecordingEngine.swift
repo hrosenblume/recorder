@@ -24,10 +24,12 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var micInput: AVAssetWriterInput?
-    private var systemAudioInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
+    private var audioMixer: AudioMixer?
 
     private var sessionStarted = false
+    private var mixerStarted = false
+    private var fallbackMicOnly = false
     private var outputURL: URL?
 
     func toggle() {
@@ -106,8 +108,6 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
 
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
-        // Display dimensions: SCDisplay.width/height are points on macOS 14+;
-        // multiply by backingScaleFactor for retina-resolution output.
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         let pixelWidth = Int(CGFloat(display.width) * scale)
         let pixelHeight = Int(CGFloat(display.height) * scale)
@@ -128,40 +128,36 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         guard writer.canAdd(videoInput) else { throw RecorderError.writerSetup("video input") }
         writer.add(videoInput)
 
-        // Mic input (always present)
+        // Single audio input (fed by mixer; falls back to direct mic if engine fails)
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 48000,
             AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 128_000
+            AVEncoderBitRateKey: 192_000
         ]
-        let micInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        micInput.expectsMediaDataInRealTime = true
-        guard writer.canAdd(micInput) else { throw RecorderError.writerSetup("mic input") }
-        writer.add(micInput)
-
-        // System audio input (optional, controlled by user toggle)
-        var systemAudioInput: AVAssetWriterInput?
-        if captureSystemAudio {
-            let sysInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-            sysInput.expectsMediaDataInRealTime = true
-            if writer.canAdd(sysInput) {
-                writer.add(sysInput)
-                systemAudioInput = sysInput
-            } else {
-                NSLog("Recorder: writer rejected system audio input; continuing mic-only")
-            }
-        }
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        audioInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(audioInput) else { throw RecorderError.writerSetup("audio input") }
+        writer.add(audioInput)
 
         guard writer.startWriting() else {
             throw RecorderError.writerSetup("startWriting failed: \(writer.error?.localizedDescription ?? "unknown")")
         }
 
+        // Audio mixer (started lazily on first video sample so PTS aligns)
+        let mixer = AudioMixer()
+        mixer.attach(systemAudio: captureSystemAudio)
+        mixer.onMixedSample = { [weak self] sample in
+            self?.appendMixedAudio(sample)
+        }
+
         self.writer = writer
         self.videoInput = videoInput
-        self.micInput = micInput
-        self.systemAudioInput = systemAudioInput
+        self.audioInput = audioInput
+        self.audioMixer = mixer
         self.sessionStarted = false
+        self.mixerStarted = false
+        self.fallbackMicOnly = false
 
         // Configure SCStream
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -172,8 +168,8 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.queueDepth = 6
         config.showsCursor = true
-        config.capturesAudio = (systemAudioInput != nil)
-        if config.capturesAudio {
+        config.capturesAudio = captureSystemAudio
+        if captureSystemAudio {
             config.sampleRate = 48000
             config.channelCount = 2
             config.excludesCurrentProcessAudio = true
@@ -182,7 +178,7 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         let output = StreamOutput(engine: self)
         let stream = SCStream(filter: filter, configuration: config, delegate: output)
         try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: videoQueue)
-        if config.capturesAudio {
+        if captureSystemAudio {
             try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: systemAudioQueue)
         }
         try await stream.startCapture()
@@ -227,6 +223,18 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: pts)
             sessionStarted = true
+
+            // Start the mixer with the same PTS so audio aligns with video.
+            if let mixer = audioMixer, !mixerStarted {
+                do {
+                    try mixer.start(firstVideoPTS: pts)
+                    mixerStarted = true
+                } catch {
+                    NSLog("Recorder: AudioMixer.start failed (\(error)) — falling back to direct mic")
+                    fallbackMicOnly = true
+                    audioMixer = nil
+                }
+            }
         }
 
         if videoInput.isReadyForMoreMediaData {
@@ -235,16 +243,26 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
     }
 
     fileprivate func handleMicSample(_ sampleBuffer: CMSampleBuffer) {
-        guard sessionStarted, let micInput, micInput.isReadyForMoreMediaData else { return }
-        micInput.append(sampleBuffer)
+        guard sessionStarted else { return }
+
+        if let mixer = audioMixer, !fallbackMicOnly {
+            mixer.pushMic(sampleBuffer)
+            return
+        }
+
+        // Fallback path: write mic directly to the audio input.
+        guard let audioInput, audioInput.isReadyForMoreMediaData else { return }
+        audioInput.append(sampleBuffer)
     }
 
     fileprivate func handleSystemAudioSample(_ sampleBuffer: CMSampleBuffer) {
-        guard sessionStarted,
-              let systemAudioInput,
-              systemAudioInput.isReadyForMoreMediaData
-        else { return }
-        systemAudioInput.append(sampleBuffer)
+        guard sessionStarted, let mixer = audioMixer, !fallbackMicOnly else { return }
+        mixer.pushSystem(sampleBuffer)
+    }
+
+    private func appendMixedAudio(_ sample: CMSampleBuffer) {
+        guard let audioInput, audioInput.isReadyForMoreMediaData else { return }
+        audioInput.append(sample)
     }
 
     fileprivate func handleStreamStopped(_ error: Error?) {
@@ -261,8 +279,8 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         state = .stopping
         let writer = self.writer
         let videoInput = self.videoInput
-        let micInput = self.micInput
-        let systemAudioInput = self.systemAudioInput
+        let audioInput = self.audioInput
+        let mixer = self.audioMixer
         let session = self.captureSession
         let stream = self.stream
         let url = self.outputURL
@@ -272,10 +290,10 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
                 try? await stream.stopCapture()
             }
             session?.stopRunning()
+            mixer?.stop()
 
             videoInput?.markAsFinished()
-            micInput?.markAsFinished()
-            systemAudioInput?.markAsFinished()
+            audioInput?.markAsFinished()
 
             if let writer {
                 await writer.finishWriting()
@@ -305,9 +323,11 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         micDelegate = nil
         writer = nil
         videoInput = nil
-        micInput = nil
-        systemAudioInput = nil
+        audioInput = nil
+        audioMixer = nil
         sessionStarted = false
+        mixerStarted = false
+        fallbackMicOnly = false
         outputURL = nil
     }
 
