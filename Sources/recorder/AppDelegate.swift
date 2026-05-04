@@ -49,6 +49,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gettingStarted.target = self
         menu.addItem(gettingStarted)
 
+        let resetPerms = NSMenuItem(
+            title: "Reset Permissions…",
+            action: #selector(resetPermissions),
+            keyEquivalent: ""
+        )
+        resetPerms.target = self
+        menu.addItem(resetPerms)
+
         let updates = NSMenuItem(
             title: "Check for Updates…",
             action: #selector(checkForUpdates),
@@ -114,6 +122,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func checkForUpdates() {
         updater.check(silent: false)
+    }
+
+    @objc private func resetPermissions() {
+        Permissions.resetAndReauthorize()
     }
 
     @objc private func openWebsite() {
