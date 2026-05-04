@@ -229,12 +229,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private static func makeRecordingIcon() -> NSImage {
-        let sizeConfig = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        let colorConfig = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
-        let merged = sizeConfig.applying(colorConfig)
+        // Discreet: same template tint as idle, only shape changes (outline → filled).
+        // Anyone glancing at the menu bar won't be tipped off that we're recording.
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
         let base = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recorder recording")
-        let image = base?.withSymbolConfiguration(merged) ?? NSImage()
-        image.isTemplate = false
+        let image = base?.withSymbolConfiguration(config) ?? NSImage()
+        image.isTemplate = true
         return image
     }
 
