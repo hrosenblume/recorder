@@ -3,7 +3,7 @@ import AppKit
 import CoreMedia
 import ScreenCaptureKit
 
-final class RecordingEngine: NSObject {
+final class RecordingEngine: NSObject, @unchecked Sendable {
     enum State { case idle, starting, recording, stopping }
 
     var onStateChange: ((Bool) -> Void)?
@@ -11,19 +11,21 @@ final class RecordingEngine: NSObject {
 
     private let stateQueue = DispatchQueue(label: "com.hunter.recorder.state")
     private let videoQueue = DispatchQueue(label: "com.hunter.recorder.video")
-    private let audioQueue = DispatchQueue(label: "com.hunter.recorder.audio")
+    private let micQueue = DispatchQueue(label: "com.hunter.recorder.mic")
+    private let systemAudioQueue = DispatchQueue(label: "com.hunter.recorder.systemaudio")
 
     private var state: State = .idle
 
     private var stream: SCStream?
     private var streamOutput: StreamOutput?
     private var captureSession: AVCaptureSession?
-    private var audioOutput: AVCaptureAudioDataOutput?
-    private var audioDelegate: AudioDelegate?
+    private var micOutput: AVCaptureAudioDataOutput?
+    private var micDelegate: MicDelegate?
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
+    private var micInput: AVAssetWriterInput?
+    private var systemAudioInput: AVAssetWriterInput?
 
     private var sessionStarted = false
     private var outputURL: URL?
@@ -98,17 +100,19 @@ final class RecordingEngine: NSObject {
             throw RecorderError.missingMicPermission
         }
 
+        let captureSystemAudio = Config.recordSystemAudio
         let url = Self.nextOutputURL()
         outputURL = url
 
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
 
-        // Use display's pixel dimensions (SCDisplay reports point dimensions on macOS 14+;
-        // multiply by backingScaleFactor for retina output).
+        // Display dimensions: SCDisplay.width/height are points on macOS 14+;
+        // multiply by backingScaleFactor for retina-resolution output.
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         let pixelWidth = Int(CGFloat(display.width) * scale)
         let pixelHeight = Int(CGFloat(display.height) * scale)
 
+        // Video input
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: pixelWidth,
@@ -124,16 +128,30 @@ final class RecordingEngine: NSObject {
         guard writer.canAdd(videoInput) else { throw RecorderError.writerSetup("video input") }
         writer.add(videoInput)
 
+        // Mic input (always present)
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 48000,
             AVNumberOfChannelsKey: 2,
             AVEncoderBitRateKey: 128_000
         ]
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        audioInput.expectsMediaDataInRealTime = true
-        guard writer.canAdd(audioInput) else { throw RecorderError.writerSetup("audio input") }
-        writer.add(audioInput)
+        let micInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        micInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(micInput) else { throw RecorderError.writerSetup("mic input") }
+        writer.add(micInput)
+
+        // System audio input (optional, controlled by user toggle)
+        var systemAudioInput: AVAssetWriterInput?
+        if captureSystemAudio {
+            let sysInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+            sysInput.expectsMediaDataInRealTime = true
+            if writer.canAdd(sysInput) {
+                writer.add(sysInput)
+                systemAudioInput = sysInput
+            } else {
+                NSLog("Recorder: writer rejected system audio input; continuing mic-only")
+            }
+        }
 
         guard writer.startWriting() else {
             throw RecorderError.writerSetup("startWriting failed: \(writer.error?.localizedDescription ?? "unknown")")
@@ -141,7 +159,8 @@ final class RecordingEngine: NSObject {
 
         self.writer = writer
         self.videoInput = videoInput
-        self.audioInput = audioInput
+        self.micInput = micInput
+        self.systemAudioInput = systemAudioInput
         self.sessionStarted = false
 
         // Configure SCStream
@@ -153,11 +172,19 @@ final class RecordingEngine: NSObject {
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.queueDepth = 6
         config.showsCursor = true
-        config.capturesAudio = false
+        config.capturesAudio = (systemAudioInput != nil)
+        if config.capturesAudio {
+            config.sampleRate = 48000
+            config.channelCount = 2
+            config.excludesCurrentProcessAudio = true
+        }
 
         let output = StreamOutput(engine: self)
         let stream = SCStream(filter: filter, configuration: config, delegate: output)
         try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: videoQueue)
+        if config.capturesAudio {
+            try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: systemAudioQueue)
+        }
         try await stream.startCapture()
 
         self.stream = stream
@@ -168,21 +195,21 @@ final class RecordingEngine: NSObject {
         guard let micDevice = AVCaptureDevice.default(for: .audio) else {
             throw RecorderError.noMicrophone
         }
-        let micInput = try AVCaptureDeviceInput(device: micDevice)
-        guard session.canAddInput(micInput) else { throw RecorderError.writerSetup("mic input") }
-        session.addInput(micInput)
+        let micCaptureInput = try AVCaptureDeviceInput(device: micDevice)
+        guard session.canAddInput(micCaptureInput) else { throw RecorderError.writerSetup("mic input") }
+        session.addInput(micCaptureInput)
 
-        let audioOut = AVCaptureAudioDataOutput()
-        let audioDelegate = AudioDelegate(engine: self)
-        audioOut.setSampleBufferDelegate(audioDelegate, queue: audioQueue)
-        guard session.canAddOutput(audioOut) else { throw RecorderError.writerSetup("audio output") }
-        session.addOutput(audioOut)
+        let micOut = AVCaptureAudioDataOutput()
+        let micDelegate = MicDelegate(engine: self)
+        micOut.setSampleBufferDelegate(micDelegate, queue: micQueue)
+        guard session.canAddOutput(micOut) else { throw RecorderError.writerSetup("mic output") }
+        session.addOutput(micOut)
 
         session.startRunning()
 
         self.captureSession = session
-        self.audioOutput = audioOut
-        self.audioDelegate = audioDelegate
+        self.micOutput = micOut
+        self.micDelegate = micDelegate
     }
 
     fileprivate func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
@@ -207,9 +234,17 @@ final class RecordingEngine: NSObject {
         }
     }
 
-    fileprivate func handleAudioSample(_ sampleBuffer: CMSampleBuffer) {
-        guard sessionStarted, let audioInput, audioInput.isReadyForMoreMediaData else { return }
-        audioInput.append(sampleBuffer)
+    fileprivate func handleMicSample(_ sampleBuffer: CMSampleBuffer) {
+        guard sessionStarted, let micInput, micInput.isReadyForMoreMediaData else { return }
+        micInput.append(sampleBuffer)
+    }
+
+    fileprivate func handleSystemAudioSample(_ sampleBuffer: CMSampleBuffer) {
+        guard sessionStarted,
+              let systemAudioInput,
+              systemAudioInput.isReadyForMoreMediaData
+        else { return }
+        systemAudioInput.append(sampleBuffer)
     }
 
     fileprivate func handleStreamStopped(_ error: Error?) {
@@ -226,7 +261,8 @@ final class RecordingEngine: NSObject {
         state = .stopping
         let writer = self.writer
         let videoInput = self.videoInput
-        let audioInput = self.audioInput
+        let micInput = self.micInput
+        let systemAudioInput = self.systemAudioInput
         let session = self.captureSession
         let stream = self.stream
         let url = self.outputURL
@@ -238,7 +274,8 @@ final class RecordingEngine: NSObject {
             session?.stopRunning()
 
             videoInput?.markAsFinished()
-            audioInput?.markAsFinished()
+            micInput?.markAsFinished()
+            systemAudioInput?.markAsFinished()
 
             if let writer {
                 await writer.finishWriting()
@@ -264,11 +301,12 @@ final class RecordingEngine: NSObject {
         stream = nil
         streamOutput = nil
         captureSession = nil
-        audioOutput = nil
-        audioDelegate = nil
+        micOutput = nil
+        micDelegate = nil
         writer = nil
         videoInput = nil
-        audioInput = nil
+        micInput = nil
+        systemAudioInput = nil
         sessionStarted = false
         outputURL = nil
     }
@@ -276,7 +314,7 @@ final class RecordingEngine: NSObject {
     // MARK: - Output URL
 
     private static func nextOutputURL() -> URL {
-        let dir = URL(fileURLWithPath: ("~/Local/Screenshots" as NSString).expandingTildeInPath)
+        let dir = Config.recordingsDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()
@@ -310,8 +348,15 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     init(engine: RecordingEngine) { self.engine = engine }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen else { return }
-        engine?.handleVideoSample(sampleBuffer)
+        switch type {
+        case .screen:
+            engine?.handleVideoSample(sampleBuffer)
+        case .audio:
+            engine?.handleSystemAudioSample(sampleBuffer)
+        default:
+            // Future SCStreamOutputType cases (e.g. .microphone on macOS 15) — ignore.
+            break
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -319,12 +364,12 @@ private final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-private final class AudioDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+private final class MicDelegate: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
     weak var engine: RecordingEngine?
     init(engine: RecordingEngine) { self.engine = engine }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        engine?.handleAudioSample(sampleBuffer)
+        engine?.handleMicSample(sampleBuffer)
     }
 }
 

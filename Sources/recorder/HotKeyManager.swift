@@ -24,7 +24,7 @@ final class HotKeyManager {
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
-        InstallEventHandler(
+        let installStatus = InstallEventHandler(
             GetEventDispatcherTarget(),
             { _, _, userData -> OSStatus in
                 guard let userData else { return noErr }
@@ -37,6 +37,10 @@ final class HotKeyManager {
             selfPtr,
             &eventHandlerRef
         )
+        if installStatus != noErr {
+            NSLog("Recorder: InstallEventHandler failed with status \(installStatus)")
+            return
+        }
 
         // 'rcdr' signature
         let signature: OSType = 0x72636472
@@ -44,7 +48,7 @@ final class HotKeyManager {
         let modifiers = UInt32(cmdKey | shiftKey)
         let keyCode = UInt32(kVK_ANSI_2)
 
-        RegisterEventHotKey(
+        let registerStatus = RegisterEventHotKey(
             keyCode,
             modifiers,
             hotKeyID,
@@ -52,5 +56,8 @@ final class HotKeyManager {
             0,
             &hotKeyRef
         )
+        if registerStatus != noErr {
+            NSLog("Recorder: RegisterEventHotKey failed with status \(registerStatus) — ⌘⇧2 may be claimed by another app")
+        }
     }
 }

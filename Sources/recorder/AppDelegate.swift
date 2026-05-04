@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKey: HotKeyManager?
     private var toggleItem: NSMenuItem!
     private var recentItem: NSMenuItem!
+    private var systemAudioItem: NSMenuItem!
     private let engine = RecordingEngine()
     private let updater = Updater()
     private var instructionsWindow: NSWindow?
@@ -46,6 +47,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         changeFolderItem.target = self
         menu.addItem(changeFolderItem)
+
+        menu.addItem(.separator())
+
+        systemAudioItem = NSMenuItem(
+            title: "Record System Audio",
+            action: #selector(toggleSystemAudio),
+            keyEquivalent: ""
+        )
+        systemAudioItem.target = self
+        systemAudioItem.state = Config.recordSystemAudio ? .on : .off
+        systemAudioItem.toolTip = "Captures audio coming out of your speakers/headphones (calls, music, notifications) in a second track."
+        menu.addItem(systemAudioItem)
 
         menu.addItem(.separator())
 
@@ -122,6 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func checkForUpdates() {
         updater.check(silent: false)
+    }
+
+    @objc private func toggleSystemAudio() {
+        let next = !Config.recordSystemAudio
+        Config.setRecordSystemAudio(next)
+        systemAudioItem.state = next ? .on : .off
     }
 
     @objc private func changeRecordingsFolder() {
@@ -266,28 +285,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     Recorder — Getting Started
 
     1. Toggle a recording
-       Press ⌘⇧2 anywhere on your Mac to start. Press it again to stop. The menu bar icon turns red while recording.
+       Press ⌘⇧2 anywhere on your Mac to start. Press it again to stop. The
+       menu bar icon switches from outline to filled while recording — subtle
+       on purpose so it doesn't stand out when you're sharing your screen.
 
     2. Where files go
-       Recordings are saved to ~/Local/Screenshots as
-       Recording <date> at <time>.mov
-       (matching the macOS screenshot naming convention).
+       Recordings save to ~/Local/Screenshots by default (matching the macOS
+       screenshot folder convention). Use "Change Recordings Folder…" in the
+       menu to point them anywhere you want.
+
+       Files are named: Recording <date> at <time>.mov
 
     3. What's captured
        • Main display, retina resolution
        • Default microphone (great for narrating bug reports)
-       • System audio is not captured in v1 — coming later
+       • System audio (the other side of calls, music, notifications) — toggle
+         "Record System Audio" in the menu. On by default.
 
-    4. Permissions (first run)
-       macOS will prompt for Screen Recording and Microphone access. Grant both.
-       After granting Screen Recording, quit Recorder and relaunch — TCC requires that.
+       The output .mov has separate mic and system-audio tracks. Both play
+       together in QuickTime Player, Quick Look, Slack previews, and most
+       editors — no manual track-toggling needed.
 
-    5. Quick reference
+    4. Recording calls (AirPods etc.)
+       Leave "Record System Audio" on. The other person's voice is captured
+       through system audio (their voice → your AirPods → recorded). Your
+       voice is captured through the AirPods mic. Both end up in the file.
+
+    5. Permissions (first run)
+       macOS prompts for Screen Recording and Microphone access. Grant both.
+       After granting Screen Recording, quit Recorder and relaunch — TCC
+       requires that.
+
+    6. Quick reference
        ⌘⇧2          Start / stop recording
        Menu bar     Click the icon for menu options
        Recent       The "Recent Recordings" submenu lists your last 8 files
 
-    6. Updates
+    7. Updates
        Recorder checks GitHub once per day for new releases. You can also use
        "Check for Updates…" from the menu.
 

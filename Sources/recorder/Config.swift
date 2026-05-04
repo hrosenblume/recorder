@@ -9,6 +9,7 @@ enum Config {
     static let lastUpdateCheckKey = "lastUpdateCheck"
 
     private static let recordingsFolderKey = "recordingsFolderPath"
+    private static let recordSystemAudioKey = "recordSystemAudio"
     static let defaultRecordingsPath = ("~/Local/Screenshots" as NSString).expandingTildeInPath
 
     static var currentVersion: String {
@@ -22,5 +23,20 @@ enum Config {
 
     static func setRecordingsDirectory(_ url: URL) {
         UserDefaults.standard.set(url.path, forKey: recordingsFolderKey)
+    }
+
+    /// Default true. When enabled, recordings include a second audio track
+    /// captured from system output (other side of calls, music, notifications).
+    static var recordSystemAudio: Bool {
+        // UserDefaults.bool(forKey:) returns false for unset keys, so use object(forKey:)
+        // to distinguish "unset" (default to true) from "explicitly false".
+        if let stored = UserDefaults.standard.object(forKey: recordSystemAudioKey) as? Bool {
+            return stored
+        }
+        return true
+    }
+
+    static func setRecordSystemAudio(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: recordSystemAudioKey)
     }
 }
