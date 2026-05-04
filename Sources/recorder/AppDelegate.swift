@@ -39,6 +39,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
+        let changeFolderItem = NSMenuItem(
+            title: "Change Recordings Folder…",
+            action: #selector(changeRecordingsFolder),
+            keyEquivalent: ""
+        )
+        changeFolderItem.target = self
+        menu.addItem(changeFolderItem)
+
         menu.addItem(.separator())
 
         let gettingStarted = NSMenuItem(
@@ -48,14 +56,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         gettingStarted.target = self
         menu.addItem(gettingStarted)
-
-        let resetPerms = NSMenuItem(
-            title: "Reset Permissions…",
-            action: #selector(resetPermissions),
-            keyEquivalent: ""
-        )
-        resetPerms.target = self
-        menu.addItem(resetPerms)
 
         let updates = NSMenuItem(
             title: "Check for Updates…",
@@ -124,8 +124,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updater.check(silent: false)
     }
 
-    @objc private func resetPermissions() {
-        Permissions.resetAndReauthorize()
+    @objc private func changeRecordingsFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = Config.recordingsDirectory
+        panel.prompt = "Choose"
+        panel.message = "Choose where to save your recordings"
+
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            Config.setRecordingsDirectory(url)
+        }
     }
 
     @objc private func openWebsite() {
