@@ -68,23 +68,34 @@ final class RecordingEngine: NSObject {
     }
 
     private func startCapture() async throws {
-        guard CGPreflightScreenCaptureAccess() else {
-            Permissions.openScreenCaptureSettings()
+        // Skip CGPreflightScreenCaptureAccess() — on macOS 15 with ad-hoc signing
+        // it reports stale results when the cdhash drifts. Trust SCShareableContent
+        // instead, which consults TCC directly with the running cdhash.
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true
+            )
+        } catch {
+            await MainActor.run { Permissions.promptForScreenCapture() }
             throw RecorderError.missingScreenPermission
         }
-        guard Permissions.hasMicrophone else {
-            Permissions.openMicrophoneSettings()
-            throw RecorderError.missingMicPermission
+
+        guard !content.displays.isEmpty else {
+            await MainActor.run { Permissions.promptForScreenCapture() }
+            throw RecorderError.missingScreenPermission
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: true
-        )
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID })
             ?? content.displays.first
         else {
             throw RecorderError.noDisplay
+        }
+
+        guard Permissions.hasMicrophone else {
+            await MainActor.run { Permissions.openMicrophoneSettings() }
+            throw RecorderError.missingMicPermission
         }
 
         let url = Self.nextOutputURL()

@@ -221,46 +221,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private static func makeIdleIcon() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        image.lockFocus()
-
-        let circleRect = NSRect(x: 1, y: 1, width: 16, height: 16)
-        let gradient = NSGradient(colors: [
-            NSColor(calibratedRed: 0.39, green: 0.36, blue: 0.92, alpha: 1.0),
-            NSColor(calibratedRed: 0.85, green: 0.42, blue: 0.71, alpha: 1.0)
-        ])
-        let circle = NSBezierPath(ovalIn: circleRect)
-        gradient?.draw(in: circle, angle: 45)
-
-        let triangle = NSBezierPath()
-        triangle.move(to: NSPoint(x: 7.0, y: 5.5))
-        triangle.line(to: NSPoint(x: 7.0, y: 12.5))
-        triangle.line(to: NSPoint(x: 13.0, y: 9.0))
-        triangle.close()
-        NSColor.white.setFill()
-        triangle.fill()
-
-        image.unlockFocus()
-        image.isTemplate = false
-        image.accessibilityDescription = "Recorder idle"
+        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        let base = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Recorder idle")
+        let image = base?.withSymbolConfiguration(config) ?? NSImage()
+        image.isTemplate = true
         return image
     }
 
     private static func makeRecordingIcon() -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size)
-        image.lockFocus()
-
-        NSColor.systemRed.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 16, height: 16)).fill()
-
-        NSColor.white.withAlphaComponent(0.95).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 6, y: 6, width: 6, height: 6)).fill()
-
-        image.unlockFocus()
+        let sizeConfig = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        let colorConfig = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
+        let merged = sizeConfig.applying(colorConfig)
+        let base = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Recorder recording")
+        let image = base?.withSymbolConfiguration(merged) ?? NSImage()
         image.isTemplate = false
-        image.accessibilityDescription = "Recorder recording"
         return image
     }
 
