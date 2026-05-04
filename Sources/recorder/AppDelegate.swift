@@ -2,10 +2,12 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
+    private var statusMenu: NSMenu!
     private var hotKey: HotKeyManager?
     private var toggleItem: NSMenuItem!
     private var recentItem: NSMenuItem!
     private var systemAudioItem: NSMenuItem!
+    private var isRecording = false
     private let engine = RecordingEngine()
     private let updater = Updater()
     private var instructionsWindow: NSWindow?
@@ -99,11 +101,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         version.isEnabled = false
         menu.addItem(version)
 
-        statusItem.menu = menu
+        // Don't set statusItem.menu directly. Wire the button's action so a click
+        // during a recording stops & saves; otherwise we pop the menu programmatically.
+        statusMenu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(statusButtonClicked)
 
         engine.onStateChange = { [weak self] recording in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.isRecording = recording
                 self.updateIcon(recording: recording)
                 self.toggleItem.title = recording ? "Stop" : "Start"
             }
@@ -122,6 +129,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Menu actions
+
+    @objc private func statusButtonClicked() {
+        if isRecording {
+            // Click during a recording = stop & save (parity with ⌘⇧2).
+            engine.toggle()
+        } else {
+            // Otherwise pop the menu beneath the button.
+            guard let button = statusItem.button else { return }
+            let location = NSPoint(x: 0, y: button.bounds.height + 4)
+            statusMenu.popUp(positioning: nil, at: location, in: button)
+        }
+    }
 
     @objc private func toggleRecording() {
         engine.toggle()
@@ -209,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Recent recordings
 
     func menuWillOpen(_ menu: NSMenu) {
-        if menu === statusItem.menu {
+        if menu === statusMenu {
             rebuildRecentRecordings()
         }
     }

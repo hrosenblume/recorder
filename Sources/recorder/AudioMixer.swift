@@ -9,26 +9,21 @@ import Foundation
 ///
 ///     mic CMSampleBuffer ─► [AVAudioConverter] ─► [micPlayer node] ─┐
 ///                                                                   ▼
-///                                                        [mainMixerNode] ─► [tap]
-///                                                                   ▲           │
-///     SCK CMSampleBuffer ─► [AVAudioConverter] ─► [systemPlayer]   ─┘           ▼
+///                                                        [mainMixerNode] ─► renderOffline
+///                                                                   ▲              │
+///     SCK CMSampleBuffer ─► [AVAudioConverter] ─► [systemPlayer]   ─┘              ▼
 ///                                                                          CMSampleBuffer
 ///
-/// Both player→mixer connections use the same common format
-/// (Float32 stereo @ 48 kHz, deinterleaved). Each source has its own
-/// AVAudioConverter that lazily configures from the first incoming sample.
-///
-/// PTS bookkeeping is deterministic: the first emitted CMSampleBuffer's PTS
-/// is the first video sample's PTS; subsequent buffers extend the timeline by
-/// the number of frames produced. This keeps the audio track tightly aligned
-/// with the video track regardless of engine-internal timing.
+/// Critical: the engine runs in **manual rendering mode** (.realtime).
+/// AVAudioEngine in normal mode auto-connects mainMixerNode→outputNode, which
+/// plays the mix out the speakers — with AirPods that creates a feedback loop
+/// where the mic captures the played-back audio and the engine's auto-gain
+/// drops mic level. Manual mode disables hardware output entirely; we drive
+/// the render via a DispatchSourceTimer.
 final class AudioMixer: @unchecked Sendable {
     // MARK: - Public surface
 
-    /// Set this before calling `start(firstVideoPTS:)`.
     var onMixedSample: ((CMSampleBuffer) -> Void)?
-
-    /// Whether system audio playback is wired in. Set via `attach(systemAudio:)`.
     private(set) var isSystemAudioAttached: Bool = false
 
     // MARK: - Engine
@@ -49,6 +44,16 @@ final class AudioMixer: @unchecked Sendable {
     private var micConverter: AVAudioConverter?
     private var systemConverter: AVAudioConverter?
 
+    // MARK: - Render loop
+
+    private let renderQueue = DispatchQueue(
+        label: "com.hunter.recorder.audio.render",
+        qos: .userInteractive
+    )
+    private var renderTimer: DispatchSourceTimer?
+    private var renderBuffer: AVAudioPCMBuffer?
+    private let renderFrameCount: AVAudioFrameCount = 480 // ~10 ms at 48 kHz
+
     // MARK: - Timing
 
     private var firstVideoPTS: CMTime = .invalid
@@ -58,7 +63,6 @@ final class AudioMixer: @unchecked Sendable {
 
     // MARK: - Setup
 
-    /// Wires player nodes into the engine. Must be called before `start`.
     func attach(systemAudio: Bool) {
         isSystemAudioAttached = systemAudio
         engine.attach(micPlayer)
@@ -71,44 +75,60 @@ final class AudioMixer: @unchecked Sendable {
         systemPlayer.volume = Config.systemAudioVolume
     }
 
-    /// Installs the mixer tap and starts the engine.
-    /// `firstVideoPTS` anchors the audio timeline to the video track.
     func start(firstVideoPTS: CMTime) throws {
         stateLock.lock()
-        defer { stateLock.unlock() }
-
         self.firstVideoPTS = firstVideoPTS
         self.framesEmitted = 0
+        stateLock.unlock()
 
-        engine.mainMixerNode.installTap(
-            onBus: 0,
-            bufferSize: 480, // ~10 ms at 48 kHz
-            format: commonFormat
-        ) { [weak self] buffer, _ in
-            self?.handleMixedTap(buffer)
-        }
+        // Detach the engine from hardware. After this call, mainMixerNode→outputNode
+        // is gone; we render manually via renderOffline().
+        try engine.enableManualRenderingMode(
+            .realtime,
+            format: commonFormat,
+            maximumFrameCount: renderFrameCount
+        )
+
+        renderBuffer = AVAudioPCMBuffer(pcmFormat: commonFormat, frameCapacity: renderFrameCount)
 
         try engine.start()
         micPlayer.play()
         if isSystemAudioAttached {
             systemPlayer.play()
         }
+
+        stateLock.lock()
         isStarted = true
+        stateLock.unlock()
+
+        // Drive renderOffline at audio rate (~10ms cadence). DispatchSourceTimer
+        // is wall-clock-based so over time we produce exactly real-time audio.
+        let timer = DispatchSource.makeTimerSource(queue: renderQueue)
+        timer.schedule(
+            deadline: .now() + .milliseconds(10),
+            repeating: .milliseconds(10),
+            leeway: .milliseconds(2)
+        )
+        timer.setEventHandler { [weak self] in self?.renderTick() }
+        timer.resume()
+        renderTimer = timer
     }
 
-    /// Tears down. Safe to call multiple times.
     func stop() {
         stateLock.lock()
         let wasStarted = isStarted
         isStarted = false
         stateLock.unlock()
 
+        renderTimer?.cancel()
+        renderTimer = nil
+
         guard wasStarted else { return }
 
         micPlayer.stop()
         systemPlayer.stop()
-        engine.mainMixerNode.removeTap(onBus: 0)
         engine.stop()
+        renderBuffer = nil
         micConverter = nil
         systemConverter = nil
     }
@@ -139,7 +159,6 @@ final class AudioMixer: @unchecked Sendable {
         guard let sourcePCM = pcmBuffer(from: sampleBuffer) else { return }
         let sourceFormat = sourcePCM.format
 
-        // Reuse an existing converter if it matches the source format.
         var converter = self[keyPath: converterRef]
         if converter?.inputFormat != sourceFormat {
             converter = AVAudioConverter(from: sourceFormat, to: commonFormat)
@@ -175,14 +194,24 @@ final class AudioMixer: @unchecked Sendable {
         player.scheduleBuffer(output, completionHandler: nil)
     }
 
-    private func handleMixedTap(_ buffer: AVAudioPCMBuffer) {
+    private func renderTick() {
         stateLock.lock()
         let started = isStarted
         let basePTS = firstVideoPTS
         let framesSoFar = framesEmitted
         stateLock.unlock()
 
-        guard started, basePTS.isValid, buffer.frameLength > 0 else { return }
+        guard started, basePTS.isValid, let buffer = renderBuffer else { return }
+
+        let status: AVAudioEngineManualRenderingStatus
+        do {
+            status = try engine.renderOffline(renderFrameCount, to: buffer)
+        } catch {
+            NSLog("Recorder: renderOffline threw - \(error)")
+            return
+        }
+
+        guard status == .success, buffer.frameLength > 0 else { return }
 
         let pts = CMTimeAdd(
             basePTS,
