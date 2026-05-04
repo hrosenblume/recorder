@@ -1,38 +1,37 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import os.log
 
 /// Mixes microphone + system audio into a single stereo PCM stream and emits
 /// `CMSampleBuffer`s ready to feed an `AVAssetWriterInput`.
 ///
-/// Pipeline (no AVAudioEngine — manual mix for predictability):
+/// Pipeline (no AVAudioEngine):
 ///
-///     mic CMSampleBuffer ──► [AVAudioConverter] ──► micQueue (Float32 interleaved)
+///     mic CMSampleBuffer ──► [AVAudioConverter] ──► micLeftQueue + micRightQueue
 ///                                                          │
 ///                                       ┌──────────────────┼─── render timer (10ms tick)
 ///                                       │                  │
-///     SCK CMSampleBuffer ─► [AVAudioConverter] ─► systemQueue
+///     SCK CMSampleBuffer ─► [AVAudioConverter] ─► systemLeft + systemRight
 ///                                       │                  │
-///                                       └──► sum + soft-clip ──► CMSampleBuffer ──► writer
+///                                       └──► sum L,R + soft-clip ──► CMSampleBuffer ──► writer
 ///
-/// Earlier attempts via AVAudioEngine had hidden issues (auto-connection to
-/// outputNode → speaker playback → AirPods feedback → mic AGC reduction; manual
-/// rendering mode → empty audio track). This version uses AVAudioConverter for
-/// per-source format conversion (handles AirPods 16k mono → 48k stereo etc.)
-/// and does the mix arithmetic ourselves.
+/// Uses non-interleaved Float32 buffers so `floatChannelData` is valid (docs
+/// state it returns nil for interleaved). Per-channel queues avoid a flat
+/// interleaved Float array.
 final class AudioMixer: @unchecked Sendable {
     // MARK: - Public
 
     var onMixedSample: ((CMSampleBuffer) -> Void)?
     private(set) var isSystemAudioAttached: Bool = false
 
-    // MARK: - Format
+    // MARK: - Format (non-interleaved so floatChannelData[0/1] are valid)
 
-    private let commonFormat = AVAudioFormat(
+    let commonFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 48000,
         channels: 2,
-        interleaved: true
+        interleaved: false
     )!
     private let renderFrames: Int = 480 // ~10 ms @ 48 kHz
 
@@ -41,14 +40,13 @@ final class AudioMixer: @unchecked Sendable {
     private var micConverter: AVAudioConverter?
     private var systemConverter: AVAudioConverter?
 
-    private var micQueue: [Float] = [] // interleaved L,R,L,R,...
-    private var systemQueue: [Float] = []
+    private var micLeft: [Float] = []
+    private var micRight: [Float] = []
+    private var systemLeft: [Float] = []
+    private var systemRight: [Float] = []
     private let micLock = NSLock()
     private let systemLock = NSLock()
-
-    /// Cap each per-source queue to ~1 second (96000 stereo samples). If we
-    /// somehow get behind, drop oldest data rather than leak memory.
-    private let maxQueueSamples: Int = 96000
+    private let maxQueueFrames: Int = 48000 // ~1 second per channel
 
     // MARK: - Render loop
 
@@ -65,10 +63,19 @@ final class AudioMixer: @unchecked Sendable {
     private var isStarted = false
     private let stateLock = NSLock()
 
+    // MARK: - Diagnostics
+
+    private let log = OSLog(subsystem: "com.hunter.recorder", category: "AudioMixer")
+    private var pushMicCount: Int = 0
+    private var pushSystemCount: Int = 0
+    private var tickCount: Int = 0
+    private var emitCount: Int = 0
+
     // MARK: - API
 
     func attach(systemAudio: Bool) {
         isSystemAudioAttached = systemAudio
+        os_log(.default, log: log, "attach systemAudio=%{public}@", String(describing: systemAudio))
     }
 
     func start(firstVideoPTS: CMTime) throws {
@@ -77,6 +84,8 @@ final class AudioMixer: @unchecked Sendable {
         self.framesEmitted = 0
         isStarted = true
         stateLock.unlock()
+
+        os_log(.default, log: log, "start basePTS=%{public}@", String(describing: firstVideoPTS))
 
         let timer = DispatchSource.makeTimerSource(queue: renderQueue)
         timer.schedule(
@@ -99,48 +108,83 @@ final class AudioMixer: @unchecked Sendable {
         renderTimer = nil
 
         if wasStarted {
-            micLock.lock(); micQueue.removeAll(); micLock.unlock()
-            systemLock.lock(); systemQueue.removeAll(); systemLock.unlock()
+            os_log(
+                .default, log: log,
+                "stop counts mic=%{public}d sys=%{public}d ticks=%{public}d emits=%{public}d",
+                pushMicCount, pushSystemCount, tickCount, emitCount
+            )
+            micLock.lock(); micLeft.removeAll(); micRight.removeAll(); micLock.unlock()
+            systemLock.lock(); systemLeft.removeAll(); systemRight.removeAll(); systemLock.unlock()
             micConverter = nil
             systemConverter = nil
         }
     }
 
     func pushMic(_ sampleBuffer: CMSampleBuffer) {
-        push(sampleBuffer, lock: micLock, queueRef: \.micQueue, converterRef: \.micConverter)
+        push(
+            sampleBuffer,
+            lock: micLock,
+            leftRef: \.micLeft,
+            rightRef: \.micRight,
+            converterRef: \.micConverter,
+            isMic: true
+        )
     }
 
     func pushSystem(_ sampleBuffer: CMSampleBuffer) {
         guard isSystemAudioAttached else { return }
-        push(sampleBuffer, lock: systemLock, queueRef: \.systemQueue, converterRef: \.systemConverter)
+        push(
+            sampleBuffer,
+            lock: systemLock,
+            leftRef: \.systemLeft,
+            rightRef: \.systemRight,
+            converterRef: \.systemConverter,
+            isMic: false
+        )
     }
 
-    // MARK: - Push (CMSampleBuffer → converted Float32 interleaved → queue)
+    // MARK: - Push
 
     private func push(
         _ sampleBuffer: CMSampleBuffer,
         lock: NSLock,
-        queueRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
-        converterRef: ReferenceWritableKeyPath<AudioMixer, AVAudioConverter?>
+        leftRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
+        rightRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
+        converterRef: ReferenceWritableKeyPath<AudioMixer, AVAudioConverter?>,
+        isMic: Bool
     ) {
         stateLock.lock()
         let started = isStarted
         stateLock.unlock()
         guard started else { return }
 
-        guard let inputPCM = pcmBuffer(from: sampleBuffer) else { return }
+        if isMic {
+            pushMicCount += 1
+        } else {
+            pushSystemCount += 1
+        }
+
+        guard let inputPCM = pcmBuffer(from: sampleBuffer) else {
+            os_log(.error, log: log, "pcmBuffer(from:) returned nil isMic=%{public}@", String(describing: isMic))
+            return
+        }
         let inputFormat = inputPCM.format
 
         var converter = self[keyPath: converterRef]
         if converter?.inputFormat != inputFormat {
             converter = AVAudioConverter(from: inputFormat, to: commonFormat)
             self[keyPath: converterRef] = converter
+            os_log(.default, log: log, "new converter isMic=%{public}@ in=%{public}@", String(describing: isMic), String(describing: inputFormat))
         }
-        guard let converter else { return }
+        guard let converter else {
+            os_log(.error, log: log, "no converter")
+            return
+        }
 
         let ratio = commonFormat.sampleRate / inputFormat.sampleRate
         let outputCapacity = AVAudioFrameCount(Double(inputPCM.frameLength) * ratio + 1024)
         guard let outputPCM = AVAudioPCMBuffer(pcmFormat: commonFormat, frameCapacity: outputCapacity) else {
+            os_log(.error, log: log, "outputPCM alloc failed")
             return
         }
 
@@ -156,31 +200,34 @@ final class AudioMixer: @unchecked Sendable {
             return inputPCM
         }
         if status == .error {
-            if let error { NSLog("Recorder: converter error - \(error)") }
+            os_log(.error, log: log, "converter error %{public}@", String(describing: error))
             return
         }
-        guard outputPCM.frameLength > 0 else { return }
+        guard outputPCM.frameLength > 0,
+              let channelData = outputPCM.floatChannelData
+        else {
+            os_log(.error, log: log, "outputPCM has no data frameLength=%{public}d", Int(outputPCM.frameLength))
+            return
+        }
 
-        // Read interleaved samples via audioBufferList — floatChannelData is
-        // documented to return nil for interleaved buffers.
-        let bufferList = outputPCM.audioBufferList
-        let audioBuffer = bufferList.pointee.mBuffers
-        guard let dataPtr = audioBuffer.mData else { return }
-
-        let sampleCount = Int(outputPCM.frameLength) * Int(commonFormat.channelCount)
-        let typedPtr = dataPtr.assumingMemoryBound(to: Float.self)
-        let samples = UnsafeBufferPointer(start: typedPtr, count: sampleCount)
+        let frameCount = Int(outputPCM.frameLength)
+        let leftPtr = channelData[0]
+        let rightPtr = channelData[1]
+        let leftSamples = Array(UnsafeBufferPointer(start: leftPtr, count: frameCount))
+        let rightSamples = Array(UnsafeBufferPointer(start: rightPtr, count: frameCount))
 
         lock.lock()
-        self[keyPath: queueRef].append(contentsOf: samples)
-        let queueSize = self[keyPath: queueRef].count
-        if queueSize > maxQueueSamples {
-            self[keyPath: queueRef].removeFirst(queueSize - maxQueueSamples)
+        self[keyPath: leftRef].append(contentsOf: leftSamples)
+        self[keyPath: rightRef].append(contentsOf: rightSamples)
+        if self[keyPath: leftRef].count > maxQueueFrames {
+            let drop = self[keyPath: leftRef].count - maxQueueFrames
+            self[keyPath: leftRef].removeFirst(drop)
+            self[keyPath: rightRef].removeFirst(drop)
         }
         lock.unlock()
     }
 
-    // MARK: - Render tick (pull from queues, mix, emit)
+    // MARK: - Render tick
 
     private func tick() {
         stateLock.lock()
@@ -191,64 +238,83 @@ final class AudioMixer: @unchecked Sendable {
 
         guard started, basePTS.isValid else { return }
 
-        let stereoSamples = renderFrames * 2
+        tickCount += 1
 
-        // Pull from each queue (zero-pad if not enough samples available yet)
-        let micFrames = drainSamples(lock: micLock, queueRef: \.micQueue, count: stereoSamples)
-        let sysFrames = drainSamples(lock: systemLock, queueRef: \.systemQueue, count: stereoSamples)
+        let (micLA, micRA) = drainBoth(lock: micLock, leftRef: \.micLeft, rightRef: \.micRight, count: renderFrames)
+        let (sysLA, sysRA) = drainBoth(lock: systemLock, leftRef: \.systemLeft, rightRef: \.systemRight, count: renderFrames)
 
-        // Mix into the output buffer (interleaved access via audioBufferList).
         guard let mixedPCM = AVAudioPCMBuffer(
             pcmFormat: commonFormat,
             frameCapacity: AVAudioFrameCount(renderFrames)
         ) else { return }
         mixedPCM.frameLength = AVAudioFrameCount(renderFrames)
 
-        let bufferList = mixedPCM.mutableAudioBufferList
-        let audioBuffer = bufferList.pointee.mBuffers
-        guard let dstData = audioBuffer.mData else { return }
-        let dstPtr = dstData.assumingMemoryBound(to: Float.self)
+        guard let dst = mixedPCM.floatChannelData else { return }
+        let dstL = dst[0]
+        let dstR = dst[1]
 
         let micVol = Config.micVolume
         let sysVol = Config.systemAudioVolume
-        for i in 0..<stereoSamples {
-            let mic = i < micFrames.count ? micFrames[i] : 0
-            let sys = i < sysFrames.count ? sysFrames[i] : 0
-            var sum = mic * micVol + sys * sysVol
-            if sum > 1.0 { sum = 1.0 } else if sum < -1.0 { sum = -1.0 }
-            dstPtr[i] = sum
+
+        for i in 0..<renderFrames {
+            let mL = i < micLA.count ? micLA[i] : 0
+            let mR = i < micRA.count ? micRA[i] : 0
+            let sL = i < sysLA.count ? sysLA[i] : 0
+            let sR = i < sysRA.count ? sysRA[i] : 0
+            var lSum = mL * micVol + sL * sysVol
+            var rSum = mR * micVol + sR * sysVol
+            if lSum > 1.0 { lSum = 1.0 } else if lSum < -1.0 { lSum = -1.0 }
+            if rSum > 1.0 { rSum = 1.0 } else if rSum < -1.0 { rSum = -1.0 }
+            dstL[i] = lSum
+            dstR[i] = rSum
         }
 
-        // PTS = video start + frames emitted so far / sample rate
         let pts = CMTimeAdd(
             basePTS,
             CMTime(value: framesSoFar, timescale: CMTimeScale(commonFormat.sampleRate))
         )
 
-        guard let sample = sampleBuffer(from: mixedPCM, pts: pts) else { return }
+        guard let sample = sampleBuffer(from: mixedPCM, pts: pts) else {
+            os_log(.error, log: log, "sampleBuffer(from:) returned nil")
+            return
+        }
 
         stateLock.lock()
         framesEmitted += Int64(renderFrames)
         stateLock.unlock()
 
+        emitCount += 1
+        if emitCount % 100 == 0 {
+            os_log(
+                .default, log: log,
+                "tick %{public}d mic=%{public}d sys=%{public}d emit=%{public}d",
+                tickCount, pushMicCount, pushSystemCount, emitCount
+            )
+        }
+
         onMixedSample?(sample)
     }
 
-    private func drainSamples(
+    private func drainBoth(
         lock: NSLock,
-        queueRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
+        leftRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
+        rightRef: ReferenceWritableKeyPath<AudioMixer, [Float]>,
         count: Int
-    ) -> [Float] {
+    ) -> ([Float], [Float]) {
         lock.lock()
-        var queue = self[keyPath: queueRef]
-        let take = min(queue.count, count)
-        let result = Array(queue.prefix(take))
+        var left = self[keyPath: leftRef]
+        var right = self[keyPath: rightRef]
+        let take = min(left.count, count)
+        let lOut = Array(left.prefix(take))
+        let rOut = Array(right.prefix(take))
         if take > 0 {
-            queue.removeFirst(take)
-            self[keyPath: queueRef] = queue
+            left.removeFirst(take)
+            right.removeFirst(take)
+            self[keyPath: leftRef] = left
+            self[keyPath: rightRef] = right
         }
         lock.unlock()
-        return result
+        return (lOut, rOut)
     }
 
     // MARK: - CMSampleBuffer ⇄ AVAudioPCMBuffer
