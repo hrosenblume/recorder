@@ -159,15 +159,20 @@ final class AudioMixer: @unchecked Sendable {
             if let error { NSLog("Recorder: converter error - \(error)") }
             return
         }
-        guard outputPCM.frameLength > 0,
-              let channelData = outputPCM.floatChannelData
-        else { return }
+        guard outputPCM.frameLength > 0 else { return }
+
+        // Read interleaved samples via audioBufferList — floatChannelData is
+        // documented to return nil for interleaved buffers.
+        let bufferList = outputPCM.audioBufferList
+        let audioBuffer = bufferList.pointee.mBuffers
+        guard let dataPtr = audioBuffer.mData else { return }
 
         let sampleCount = Int(outputPCM.frameLength) * Int(commonFormat.channelCount)
-        let buffer = UnsafeBufferPointer(start: channelData[0], count: sampleCount)
+        let typedPtr = dataPtr.assumingMemoryBound(to: Float.self)
+        let samples = UnsafeBufferPointer(start: typedPtr, count: sampleCount)
 
         lock.lock()
-        self[keyPath: queueRef].append(contentsOf: buffer)
+        self[keyPath: queueRef].append(contentsOf: samples)
         let queueSize = self[keyPath: queueRef].count
         if queueSize > maxQueueSamples {
             self[keyPath: queueRef].removeFirst(queueSize - maxQueueSamples)
@@ -192,14 +197,17 @@ final class AudioMixer: @unchecked Sendable {
         let micFrames = drainSamples(lock: micLock, queueRef: \.micQueue, count: stereoSamples)
         let sysFrames = drainSamples(lock: systemLock, queueRef: \.systemQueue, count: stereoSamples)
 
-        // Mix into the output buffer
+        // Mix into the output buffer (interleaved access via audioBufferList).
         guard let mixedPCM = AVAudioPCMBuffer(
             pcmFormat: commonFormat,
             frameCapacity: AVAudioFrameCount(renderFrames)
         ) else { return }
         mixedPCM.frameLength = AVAudioFrameCount(renderFrames)
-        guard let dst = mixedPCM.floatChannelData else { return }
-        let dstPtr = dst[0]
+
+        let bufferList = mixedPCM.mutableAudioBufferList
+        let audioBuffer = bufferList.pointee.mBuffers
+        guard let dstData = audioBuffer.mData else { return }
+        let dstPtr = dstData.assumingMemoryBound(to: Float.self)
 
         let micVol = Config.micVolume
         let sysVol = Config.systemAudioVolume
