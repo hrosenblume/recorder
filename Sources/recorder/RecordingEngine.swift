@@ -64,6 +64,11 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
                     self.state = .idle
                     self.onStateChange?(false)
                 }
+                // Suppress our own alert for permission errors — macOS shows
+                // its native prompt for those, and stacking ours on top creates
+                // a double-layered dialog. Only surface non-permission errors.
+                if case RecorderError.missingScreenPermission = error { return }
+                if case RecorderError.missingMicPermission = error { return }
                 DispatchQueue.main.async {
                     self.showStartError(error)
                 }
@@ -75,18 +80,19 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
         // Skip CGPreflightScreenCaptureAccess() — on macOS 15 with ad-hoc signing
         // it reports stale results when the cdhash drifts. Trust SCShareableContent
         // instead, which consults TCC directly with the running cdhash.
+        // SCShareableContent triggers macOS's native Screen Recording prompt the
+        // first time it's called without permission. Don't add our own alert on
+        // top — that produces a double-layered dialog stack.
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: true
             )
         } catch {
-            await MainActor.run { Permissions.promptForScreenCapture() }
             throw RecorderError.missingScreenPermission
         }
 
         guard !content.displays.isEmpty else {
-            await MainActor.run { Permissions.promptForScreenCapture() }
             throw RecorderError.missingScreenPermission
         }
 
@@ -97,8 +103,9 @@ final class RecordingEngine: NSObject, @unchecked Sendable {
             throw RecorderError.noDisplay
         }
 
+        // AVCaptureDevice.requestAccess (called from Permissions.preflightAll on
+        // launch) handles the mic prompt natively. Don't open Settings ourselves.
         guard Permissions.hasMicrophone else {
-            await MainActor.run { Permissions.openMicrophoneSettings() }
             throw RecorderError.missingMicPermission
         }
 

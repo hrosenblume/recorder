@@ -12,26 +12,6 @@ enum Permissions {
         _ = await AVCaptureDevice.requestAccess(for: .audio)
     }
 
-    /// Called when the user tries to start a recording without screen access.
-    /// Shows our own alert with a clear path to System Settings, then triggers
-    /// the system prompt exactly once. macOS handles registering the app in
-    /// the Settings list — we deliberately don't try to be clever here (an
-    /// earlier attempt to wipe stale TCC entries via `tccutil reset` left users
-    /// with no entry in Settings to toggle).
-    static func promptForScreenCapture() {
-        let alert = NSAlert()
-        alert.messageText = "Screen Recording permission needed"
-        alert.informativeText = "Click \"Open System Settings\", toggle Recorder ON under \"Screen & System Audio Recording\", then quit Recorder fully and relaunch."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            _ = CGRequestScreenCaptureAccess()
-            openScreenCaptureSettings()
-        }
-    }
-
     static var hasScreenCapture: Bool { CGPreflightScreenCaptureAccess() }
 
     static var hasMicrophone: Bool {

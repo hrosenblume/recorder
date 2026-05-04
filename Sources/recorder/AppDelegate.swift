@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var instructionsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.cleanStaleTCCIfBinaryChanged()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon(recording: false)
 
@@ -298,6 +300,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let image = base?.withSymbolConfiguration(config) ?? NSImage()
         image.isTemplate = true
         return image
+    }
+
+    // MARK: - TCC stale-entry cleanup
+    //
+    // Under ad-hoc signing, every binary change shifts the cdhash — and TCC keys
+    // its grants on cdhash. When the user installs a new release, the previously
+    // granted entry in Settings is silently invalid for the new binary. macOS
+    // prompts for permission again, but the stale entry is still in the list.
+    // Detect that case via the executable's mod date and run `tccutil reset`
+    // exactly when the binary actually changed. Don't open Settings ourselves —
+    // a previous attempt to do so left users with no entry to toggle until they
+    // re-attempted a recording. With this approach, the next ⌘⇧2 triggers a
+    // clean macOS prompt that re-adds the entry naturally.
+    private static func cleanStaleTCCIfBinaryChanged() {
+        guard let path = Bundle.main.executableURL?.path,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let modDate = attrs[.modificationDate] as? Date
+        else { return }
+
+        let key = "lastKnownBinaryModDate"
+        let storedDate = UserDefaults.standard.object(forKey: key) as? Date
+
+        if storedDate != modDate {
+            // First launch of a new (or first-ever) binary.
+            runTCCUtilReset(service: "ScreenCapture")
+            runTCCUtilReset(service: "Microphone")
+            UserDefaults.standard.set(modDate, forKey: key)
+        }
+    }
+
+    private static func runTCCUtilReset(service: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", service, Config.bundleID]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSLog("Recorder: tccutil reset \(service) failed - \(error)")
+        }
     }
 
     private static let gettingStartedText = """
