@@ -38,7 +38,7 @@ export function Hero() {
         <kbd className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-sm font-mono text-zinc-200">
           ⌘⇧2
         </kbd>{" "}
-        to record your screen with mic narration.
+        to record your screen and capture all audio.
       </p>
 
       <div className="mt-10">
