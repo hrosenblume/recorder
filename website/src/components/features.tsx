@@ -17,7 +17,7 @@ const features = [
   {
     title: "Saves where you'd expect",
     description:
-      "Files go to ~/Local/Screenshots with the standard macOS naming convention: Recording <date> at <time>.mov.",
+      "Files go to your Desktop by default, with the standard macOS naming convention: Recording <date> at <time>.mov. Change the destination from the menu.",
   },
   {
     title: "Auto-update",
