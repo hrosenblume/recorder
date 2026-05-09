@@ -52,7 +52,7 @@ export function Hero() {
 
       <div className="mt-12 w-full max-w-2xl">
         <p className="mb-3 text-center text-sm font-medium text-zinc-400">
-          Or prompt Claude to do it
+          Or prompt Claude Code to do it
         </p>
         <div className="group relative rounded-lg border border-zinc-800 bg-zinc-950 p-4 font-mono text-sm">
           <pre className="overflow-x-auto whitespace-pre-wrap text-zinc-300">
