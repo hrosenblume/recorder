@@ -10,9 +10,9 @@ const features = [
       "Lives in your menu bar with a colorful play-button icon. Turns red while recording. No dock icon, no clutter.",
   },
   {
-    title: "Mic narration",
+    title: "All audio",
     description:
-      "Records the default microphone alongside your screen so you can talk through bugs, demos, or design feedback.",
+      "Captures your microphone and system audio as two separate tracks alongside the screen — narrate over a call or a video, and both are in the recording.",
   },
   {
     title: "Saves where you'd expect",
