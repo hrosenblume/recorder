@@ -31,7 +31,7 @@ Bumps `Resources/Info.plist`, builds, zips, tags, pushes, and creates the GitHub
 - Stable signing identifier `com.hunter.recorder` — never change without invalidating users' permission grants
 - Hardcoded hotkey: `⌘⇧2` (Carbon `RegisterEventHotKey`, `kVK_ANSI_2`)
 - Output naming: `Recording yyyy-MM-dd at h.mm.ss a.mov` (matches macOS screenshot format)
-- Output location: `~/Local/Screenshots` (literal, not `~/Pictures` — user-specific preference)
+- Default output location: `~/Desktop` (configurable via the menu's "Choose Folder…" item; stored in `recordingsFolderPath` UserDefault)
 
 ## Things to remember
 

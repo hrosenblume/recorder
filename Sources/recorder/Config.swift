@@ -10,7 +10,7 @@ enum Config {
 
     private static let recordingsFolderKey = "recordingsFolderPath"
     private static let recordSystemAudioKey = "recordSystemAudio"
-    static let defaultRecordingsPath = ("~/Local/Screenshots" as NSString).expandingTildeInPath
+    static let defaultRecordingsPath = ("~/Desktop" as NSString).expandingTildeInPath
 
     static var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
